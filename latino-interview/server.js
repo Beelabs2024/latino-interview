@@ -17,8 +17,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const upload    = multer({ storage: multer.memoryStorage() });
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const deepgram  = new DeepgramClient(process.env.DEEPGRAM_API_KEY);
 
+const DEEPGRAM_API_KEY   = process.env.DEEPGRAM_API_KEY;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const VOICE_ID           = process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB';
 
@@ -29,7 +29,7 @@ app.get('/api/health', (req, res) => {
   res.json({
     ok: true,
     elevenlabs: !!ELEVENLABS_API_KEY,
-    deepgram:   !!process.env.DEEPGRAM_API_KEY,
+    deepgram:   !!DEEPGRAM_API_KEY,
     anthropic:  !!process.env.ANTHROPIC_API_KEY,
     voice:      VOICE_ID,
   });
@@ -46,7 +46,7 @@ app.get('/api/questions/:role', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────
-//  TEXT → SPEECH  (ElevenLabs streaming)
+//  TEXT → SPEECH  (ElevenLabs)
 // ─────────────────────────────────────────────────────
 app.post('/api/speak', async (req, res) => {
   const { text } = req.body;
@@ -66,9 +66,9 @@ app.post('/api/speak', async (req, res) => {
           text,
           model_id: 'eleven_turbo_v2_5',
           voice_settings: {
-            stability:        0.48,
-            similarity_boost: 0.82,
-            style:            0.30,
+            stability:         0.48,
+            similarity_boost:  0.82,
+            style:             0.30,
             use_speaker_boost: true,
           },
         }),
@@ -100,26 +100,33 @@ app.post('/api/speak', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────
-//  SPEECH → TEXT  (Deepgram pre-recorded)
+//  SPEECH → TEXT  (Deepgram REST — no SDK auth issues)
 // ─────────────────────────────────────────────────────
 app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No audio' });
 
   try {
-    const { result, error } = await deepgram.listen.v1.transcribeFile(
-      req.file.buffer,
+    const response = await fetch(
+      'https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&punctuate=true&language=ar',
       {
-        model:        'nova-2',
-        smart_format: true,
-        punctuate:    true,
-        language:     'en',
+        method:  'POST',
+        headers: {
+          'Authorization': `Token ${DEEPGRAM_API_KEY}`,
+          'Content-Type':  req.file.mimetype || 'audio/webm',
+        },
+        body: req.file.buffer,
       }
     );
 
-    if (error) throw new Error(String(error));
+    if (!response.ok) {
+      const detail = await response.text();
+      console.error('Deepgram error:', detail);
+      return res.status(502).json({ error: 'Deepgram transcription failed', detail });
+    }
 
+    const data = await response.json();
     const transcript =
-      result?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
+      data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
     res.json({ transcript });
 
   } catch (err) {
@@ -129,42 +136,42 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────
-//  EVALUATE  (Claude)
+//  EVALUATE  (Claude — Arabic output)
 // ─────────────────────────────────────────────────────
 app.post('/api/evaluate', async (req, res) => {
   const { name, exp, role, questions, answers } = req.body;
 
   const qaBlock = questions.map((q, i) =>
-    `Q${i+1} [${q.cat}]: ${q.q}\nAnswer: ${answers[i] || '(No answer provided)'}`
+    `س${i+1} [${q.cat}]: ${q.q}\nالإجابة: ${answers[i] || '(لم يتم الإجابة)'}`
   ).join('\n\n');
 
-  const prompt = `You are Latino, a senior HR specialist for a schools and kindergartens network. You have just conducted a voice interview. The candidate answers below are Deepgram speech-to-text transcripts — minor transcription artefacts may exist; evaluate content and intent charitably.
+  const prompt = `أنت "لاتينو"، أخصائي موارد بشرية أول في شبكة مدارس ورياض أطفال. أجريت للتو مقابلة عمل صوتية. الإجابات أدناه منقولة نصياً عبر تقنية تحويل الكلام إلى نص — قد تحتوي على أخطاء طفيفة في النسخ، لذا قيّم المحتوى والمقصد بشكل موضوعي.
 
-Candidate: ${name}
-Role: ${role}
-Experience: ${exp}
+المرشح: ${name}
+الوظيفة المتقدم إليها: ${role}
+سنوات الخبرة: ${exp}
 
-Interview Transcript:
+نص المقابلة الكامل:
 ${qaBlock}
 
-Evaluate thoroughly. Return ONLY valid JSON — no markdown fences, no preamble:
+قيّم هذا المرشح بدقة واحترافية. أعد JSON صحيحاً فقط — بدون markdown أو مقدمات:
 {
-  "overallScore": <integer 0-100>,
+  "overallScore": <عدد صحيح 0-100>,
   "grade": "<A|B|C|D>",
-  "summary": "<2-3 sentence professional executive summary>",
+  "summary": "<ملخص تنفيذي احترافي من 2-3 جمل>",
   "questionEvals": [
-    { "score": <integer 1-5>, "evaluation": "<1-2 sentence evaluation of this specific answer>" }
+    { "score": <عدد صحيح 1-5>, "evaluation": "<تقييم من جملة أو جملتين لهذه الإجابة تحديداً>" }
   ],
-  "strengths": ["<strength 1>", "<strength 2>", "<strength 3>"],
-  "areasForGrowth": ["<area 1>", "<area 2>"],
+  "strengths": ["<نقطة قوة 1>", "<نقطة قوة 2>", "<نقطة قوة 3>"],
+  "areasForGrowth": ["<مجال تطوير 1>", "<مجال تطوير 2>"],
   "recommendation": "<HIRE|CONSIDER|REJECT>",
-  "recommendationReason": "<2-3 sentences explaining the final hiring recommendation>"
+  "recommendationReason": "<2-3 جمل تشرح التوصية النهائية>"
 }`;
 
   try {
     const message = await anthropic.messages.create({
       model:      'claude-sonnet-4-20250514',
-      max_tokens: 1500,
+      max_tokens: 2000,
       messages:   [{ role: 'user', content: prompt }],
     });
 
@@ -180,57 +187,6 @@ Evaluate thoroughly. Return ONLY valid JSON — no markdown fences, no preamble:
 });
 
 // ─────────────────────────────────────────────────────
-//  WebSocket: Deepgram live streaming (optional upgrade)
-// ─────────────────────────────────────────────────────
-wss.on('connection', (ws) => {
-  let dgConn = null;
-
-  ws.on('message', async (data) => {
-    if (typeof data === 'string') {
-      let msg;
-      try { msg = JSON.parse(data); } catch { return; }
-
-      if (msg.type === 'start') {
-        dgConn = deepgram.listen.v1.connect({
-          model:           'nova-2',
-          smart_format:    true,
-          punctuate:       true,
-          interim_results: true,
-          language:        'en',
-          encoding:        'linear16',
-          sample_rate:     16000,
-          channels:        1,
-        });
-
-        dgConn.on('open',    ()    => ws.send(JSON.stringify({ type: 'ready' })));
-        dgConn.on('Results', (d)   => {
-          const alt  = d?.channel?.alternatives?.[0];
-          const text = alt?.transcript || '';
-          if (!text) return;
-          ws.send(JSON.stringify({
-            type:       d.is_final ? 'final' : 'interim',
-            transcript: text,
-          }));
-        });
-        dgConn.on('error', (e)   => ws.send(JSON.stringify({ type: 'error', message: String(e) })));
-      }
-
-      if (msg.type === 'stop' && dgConn) {
-        try { dgConn.finish(); } catch {}
-        dgConn = null;
-      }
-      return;
-    }
-
-    if (dgConn && Buffer.isBuffer(data)) dgConn.send(data);
-  });
-
-  ws.on('close', () => {
-    if (dgConn) { try { dgConn.finish(); } catch {} }
-  });
-});
-
-// ─────────────────────────────────────────────────────
 //  START
 // ─────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
@@ -239,8 +195,8 @@ server.listen(PORT, () => {
   console.log(`║   LATINO Interview Server             ║`);
   console.log(`║   http://localhost:${PORT}               ║`);
   console.log(`╚══════════════════════════════════════╝\n`);
-  console.log(`  ElevenLabs : ${ELEVENLABS_API_KEY             ? '✓ configured' : '✗ MISSING — add to .env'}`);
-  console.log(`  Deepgram   : ${process.env.DEEPGRAM_API_KEY   ? '✓ configured' : '✗ MISSING — add to .env'}`);
-  console.log(`  Anthropic  : ${process.env.ANTHROPIC_API_KEY  ? '✓ configured' : '✗ MISSING — add to .env'}`);
+  console.log(`  ElevenLabs : ${ELEVENLABS_API_KEY            ? '✓ configured' : '✗ MISSING'}`);
+  console.log(`  Deepgram   : ${DEEPGRAM_API_KEY              ? '✓ configured' : '✗ MISSING'}`);
+  console.log(`  Anthropic  : ${process.env.ANTHROPIC_API_KEY ? '✓ configured' : '✗ MISSING'}`);
   console.log(`  Voice ID   : ${VOICE_ID}\n`);
 });
