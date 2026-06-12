@@ -196,20 +196,20 @@
     letter-spacing: 1px; text-align: center; white-space: nowrap;
   }
 
-  /* Mic indicator (shown during unlimited recording) */
+  /* Mic visualizer (shown during unlimited recording) */
   .mic-indicator {
-    position: absolute; bottom: -60px; left: 50%; transform: translateX(-50%);
+    position: absolute; bottom: -66px; left: 50%; transform: translateX(-50%);
     display: flex; flex-direction: column; align-items: center; gap: 6px;
     opacity: 0; transition: opacity .3s; white-space: nowrap;
   }
   .mic-indicator.on { opacity: 1; }
-  .mic-label { font-size: 11px; color: var(--green); letter-spacing: 1px; }
-  .mic-ripple {
-    width: 10px; height: 10px; border-radius: 50%; background: var(--green);
-    box-shadow: 0 0 0 0 rgba(39,174,96,.5);
-    animation: ripple 1.4s ease-out infinite;
+  #micCanvas { display: block; }
+  .mic-label { font-size: 11px; color: var(--green); letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }
+  .mic-dot-live {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--red);
+    animation: live-blink 1s ease-in-out infinite;
   }
-  @keyframes ripple { 0%{box-shadow:0 0 0 0 rgba(39,174,96,.5)} 70%{box-shadow:0 0 0 12px rgba(39,174,96,0)} 100%{box-shadow:0 0 0 0 rgba(39,174,96,0)} }
+  @keyframes live-blink { 0%,100%{opacity:1} 50%{opacity:.3} }
 
   /* ── Status ── */
   .status-wrap { text-align: center; max-width: 600px; padding: 0 24px; z-index: 5; }
@@ -404,9 +404,8 @@
 
     <!-- Mic: visible during unlimited answer recording -->
     <div class="mic-indicator" id="micIndicator">
-      <div style="font-size:22px;">🎙</div>
-      <div class="mic-ripple"></div>
-      <div class="mic-label">تسجيل مفتوح</div>
+      <canvas id="micCanvas" width="200" height="44"></canvas>
+      <div class="mic-label"><span class="mic-dot-live"></span> تسجيل مفتوح</div>
     </div>
   </div>
 
@@ -462,6 +461,7 @@ const S = {
   mediaRecorder: null, audioChunks: [],
   currentAudio: null,
   readTimer: null, readLeft: READ_SECONDS,
+  audioCtx: null, analyser: null, vizFrame: null,
 };
 
 const AR = ['٠','١','٢','٣','٤','٥','٦','٧','٨','٩'];
@@ -591,9 +591,63 @@ async function startRecording() {
     S.mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
     S.mediaRecorder.ondataavailable = e => { if (e.data.size > 0) S.audioChunks.push(e.data); };
     S.mediaRecorder.start(250);
+    startVisualizer(stream); // live waveform reacts to candidate's voice
   } catch(e) {
     setStatus('gold', 'خطأ في الميكروفون', 'تعذّر الوصول إلى الميكروفون: ' + e.message);
   }
+}
+
+// ═══════════════════════════════════════════════
+//  LIVE MIC VISUALIZER (Web Audio API)
+// ═══════════════════════════════════════════════
+function startVisualizer(stream) {
+  try {
+    S.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source   = S.audioCtx.createMediaStreamSource(stream);
+    S.analyser     = S.audioCtx.createAnalyser();
+    S.analyser.fftSize = 256;
+    S.analyser.smoothingTimeConstant = 0.7;
+    source.connect(S.analyser);
+
+    const canvas = document.getElementById('micCanvas');
+    const ctx    = canvas.getContext('2d');
+    const bufLen = S.analyser.frequencyBinCount;
+    const data   = new Uint8Array(bufLen);
+    const BARS   = 32;
+
+    const draw = () => {
+      S.vizFrame = requestAnimationFrame(draw);
+      S.analyser.getByteFrequencyData(data);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const barW = canvas.width / BARS;
+      const step = Math.floor(bufLen / BARS);
+      for (let i = 0; i < BARS; i++) {
+        const v = data[i * step] / 255;            // 0..1
+        const h = Math.max(2, v * canvas.height);
+        const x = i * barW;
+        const y = (canvas.height - h) / 2;
+        // green gradient that brightens with volume
+        const g = Math.round(120 + v * 135);
+        ctx.fillStyle = `rgb(39, ${g}, 96)`;
+        if (ctx.roundRect) {
+          ctx.beginPath();
+          ctx.roundRect(x + barW * 0.2, y, barW * 0.6, h, 2);
+          ctx.fill();
+        } else {
+          ctx.fillRect(x + barW * 0.2, y, barW * 0.6, h);
+        }
+      }
+    };
+    draw();
+  } catch(e) { console.error('Visualizer:', e); }
+}
+
+function stopVisualizer() {
+  if (S.vizFrame) { cancelAnimationFrame(S.vizFrame); S.vizFrame = null; }
+  if (S.audioCtx) { try { S.audioCtx.close(); } catch {} S.audioCtx = null; }
+  const canvas = document.getElementById('micCanvas');
+  if (canvas) { const ctx = canvas.getContext('2d'); ctx.clearRect(0,0,canvas.width,canvas.height); }
 }
 
 async function stopRecordingAndTranscribe() {
@@ -601,6 +655,7 @@ async function stopRecordingAndTranscribe() {
     if (!S.mediaRecorder || S.mediaRecorder.state === 'inactive') { resolve(''); return; }
 
     S.mediaRecorder.onstop = async () => {
+      stopVisualizer();
       S.mediaRecorder.stream.getTracks().forEach(t => t.stop());
       const blob = new Blob(S.audioChunks, { type: 'audio/webm' });
       if (blob.size < 500) { resolve(''); return; }
@@ -635,7 +690,7 @@ async function stopRecordingAndTranscribe() {
 //  4. Deepgram transcribes → next question
 // ═══════════════════════════════════════════════
 async function doIntro() {
-  const txt = `${timeOfDay()}، ${S.name}. أنا لاتينو، وسأجري معك مقابلة العمل اليوم لوظيفة ${S.role}. لدينا ${toAr(S.questions.length)} أسئلة. سأقرأ كل سؤال بصوت عالٍ، ثم تأخذ دقيقة للتفكير، وبعدها تجيب بحرية بدون قيود على الوقت. عندما تنتهي من الإجابة اضغط الزر. لنبدأ.`;
+  const txt = `${timeOfDay()}، ${S.name}. أَنَا لَاتِينُو، وَسَأُجْرِي مَعَكَ مُقَابَلَةَ الْعَمَلِ الْيَوْمَ لِوَظِيفَةِ ${S.role}. لَدَيْنَا ${toAr(S.questions.length)} أَسْئِلَةٍ. سَأَقْرَأُ كُلَّ سُؤَالٍ بِصَوْتٍ عَالٍ، ثُمَّ تَأْخُذُ دَقِيقَةً لِلتَّفْكِيرِ، وَبَعْدَهَا تُجِيبُ بِحُرِّيَّةٍ بِدُونِ قُيُودٍ عَلَى الْوَقْتِ. عِنْدَمَا تَنْتَهِي مِنَ الْإِجَابَةِ اضْغَطِ الزِّرَّ. لِنَبْدَأْ.`;
   setStatus('gold', 'الترحيب', txt);
   await speak(txt);
   await runQuestion();
@@ -651,14 +706,14 @@ async function runQuestion() {
   document.getElementById('btnSkip').disabled = true;
 
   // ── PHASE 1: ElevenLabs reads the question aloud ──
-  const ordinals = ['الأول','الثاني','الثالث','الرابع','الخامس','السادس','السابع','الثامن'];
-  const label = `السؤال ${ordinals[S.currentQ] || toAr(S.currentQ+1)}`;
+  const ordinals = ['الْأَوَّلُ','الثَّانِي','الثَّالِثُ','الرَّابِعُ','الْخَامِسُ','السَّادِسُ','السَّابِعُ','الثَّامِنُ'];
+  const label = `السُّؤَالُ ${ordinals[S.currentQ] || toAr(S.currentQ+1)}`;
   const fullText = `${label}. ${q.q}`;
 
-  setStatus('gold', `يُقرأ ${label}`, fullText);
-  showQuestionBox(q.q);
+  setStatus('gold', `يُقرأ ${label}`, q.display || q.q);
+  showQuestionBox(q.display || q.q);
 
-  await speak(fullText); // blocks until ElevenLabs audio finishes
+  await speak(fullText); // blocks until ElevenLabs audio finishes (uses tashkeel)
 
   // ── PHASE 2: 60s reading/thinking countdown ──
   // When countdown ends → auto-start recording
@@ -693,7 +748,7 @@ async function doneAnswering() {
   }
 
   // Bridge to next question
-  const bridges = ['شكراً لك.', 'حسناً، شكراً.', 'أقدّر ذلك.', 'شكراً على مشاركتك.', 'مفهوم، شكراً.'];
+  const bridges = ['شُكْراً لَكَ.', 'حَسَناً، شُكْراً.', 'أُقَدِّرُ ذَلِكَ.', 'شُكْراً عَلَى مُشَارَكَتِكَ.', 'مَفْهُومٌ، شُكْراً.'];
   const bridge  = bridges[Math.floor(Math.random() * bridges.length)];
   setStatus('gold', 'الانتقال', bridge);
   await speak(bridge);
@@ -710,6 +765,7 @@ async function skipQuestion() {
 
   // Stop any active recording
   if (S.mediaRecorder && S.mediaRecorder.state !== 'inactive') {
+    stopVisualizer();
     S.mediaRecorder.stream.getTracks().forEach(t => t.stop());
     try { S.mediaRecorder.stop(); } catch {}
   }
@@ -725,7 +781,7 @@ async function doOutro() {
   document.getElementById('btnSkip').disabled = true;
   refreshDots();
 
-  const outro = `شكراً جزيلاً، ${S.name}. هذا يختتم مقابلتنا. لقد أجبت على جميع الأسئلة. سنراجع إجاباتك ونتواصل معك في أقرب وقت. نتمنى لك يوماً موفقاً.`;
+  const outro = `شُكْراً جَزِيلاً، ${S.name}. هَذَا يَخْتَتِمُ مُقَابَلَتَنَا. لَقَدْ أَجَبْتَ عَلَى جَمِيعِ الْأَسْئِلَةِ. سَنُرَاجِعُ إِجَابَاتِكَ وَنَتَوَاصَلُ مَعَكَ فِي أَقْرَبِ وَقْتٍ. نَتَمَنَّى لَكَ يَوْماً مُوَفَّقاً.`;
   setStatus('gold', 'الختام', outro);
   await speak(outro);
 
@@ -736,6 +792,7 @@ async function doOutro() {
 
 async function endEarly() {
   stopReadCountdown();
+  stopVisualizer();
   if (S.currentAudio) { S.currentAudio.pause(); S.currentAudio = null; }
   if (S.mediaRecorder && S.mediaRecorder.state !== 'inactive') {
     S.mediaRecorder.stream.getTracks().forEach(t => t.stop());
@@ -790,7 +847,7 @@ function renderReport(r) {
     const ev = (questionEvals||[])[i] || {};
     const stars = '★'.repeat(ev.score||0)+'☆'.repeat(5-(ev.score||0));
     return `<div class="qa-row">
-      <div class="qa-q"><span class="qa-n">س${toAr(i+1)}</span>${q.q}</div>
+      <div class="qa-q"><span class="qa-n">س${toAr(i+1)}</span>${q.display || q.q}</div>
       <div class="qa-a">${S.answers[i]||'(لا توجد إجابة)'}</div>
       <div class="qa-eval"><span class="stars">${stars}</span>${ev.evaluation||'—'}</div>
     </div>`;
