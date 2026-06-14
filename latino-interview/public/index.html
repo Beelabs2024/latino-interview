@@ -504,6 +504,7 @@
 //  CONSTANTS
 // ═══════════════════════════════════════════════
 const READ_SECONDS = 10;   // thinking/reading time after question is spoken
+const MAX_REC_SECONDS = 180; // hard cap on answer recording (3 minutes)
 const CIRC = 2 * Math.PI * 26; // 163.4 — SVG circle circumference
 
 // ═══════════════════════════════════════════════
@@ -516,6 +517,7 @@ const S = {
   mediaRecorder: null, audioChunks: [],
   currentAudio: null,
   readTimer: null, readLeft: READ_SECONDS, readOnComplete: null,
+  recTimer: null, recLeft: MAX_REC_SECONDS,
   audioCtx: null, analyser: null, vizFrame: null, recMime: '',
 };
 
@@ -695,9 +697,41 @@ async function startRecording() {
     S.mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) S.audioChunks.push(e.data); };
     S.mediaRecorder.start(250);
     startVisualizer(stream); // live waveform reacts to candidate's voice
+    startRecCountdown();     // 3-minute hard cap
   } catch(e) {
     setStatus('gold', 'خطأ في الميكروفون', 'تعذّر الوصول إلى الميكروفون: ' + e.message);
   }
+}
+
+// ═══════════════════════════════════════════════
+//  MAX RECORDING COUNTDOWN (3 min cap → auto-submit)
+// ═══════════════════════════════════════════════
+function startRecCountdown() {
+  stopRecCountdown();
+  S.recLeft = MAX_REC_SECONDS;
+  updateRecLabel();
+  S.recTimer = setInterval(() => {
+    S.recLeft--;
+    updateRecLabel();
+    if (S.recLeft <= 0) {
+      stopRecCountdown();
+      // Time's up — auto-submit the answer
+      if (S.phase === 'listening') doneAnswering();
+    }
+  }, 1000);
+}
+
+function updateRecLabel() {
+  const m = Math.floor(S.recLeft / 60);
+  const s = S.recLeft % 60;
+  const t = `${toAr(m)}:${toAr(String(s).padStart(2,'0'))}`;
+  const urgent = S.recLeft <= 20;
+  setStatus('green', urgent ? 'تبقّى وقت قليل' : 'يرجى الإجابة الآن',
+    `التسجيل جارٍ — الوقت المتبقي ${t} — اضغط "انتهيت من الإجابة" عند الانتهاء.`);
+}
+
+function stopRecCountdown() {
+  if (S.recTimer) { clearInterval(S.recTimer); S.recTimer = null; }
 }
 
 // ═══════════════════════════════════════════════
@@ -759,6 +793,7 @@ async function stopRecordingAndTranscribe() {
 
     S.mediaRecorder.onstop = async () => {
       stopVisualizer();
+      stopRecCountdown();
       S.mediaRecorder.stream.getTracks().forEach(t => t.stop());
       const mime = S.recMime || 'audio/webm';
       const blob = new Blob(S.audioChunks, { type: mime });
@@ -917,6 +952,7 @@ async function doOutro() {
 
 async function endEarly() {
   stopReadCountdown();
+  stopRecCountdown();
   stopVisualizer();
   if (S.currentAudio) { S.currentAudio.pause(); S.currentAudio = null; }
   if (S.mediaRecorder && S.mediaRecorder.state !== 'inactive') {

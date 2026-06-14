@@ -114,7 +114,7 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
 
   try {
     const dgUrl = 'https://api.deepgram.com/v1/listen'
-      + '?model=nova-2'
+      + '?model=nova-3'
       + '&smart_format=true'
       + '&punctuate=true'
       + '&language=ar'
